@@ -1,0 +1,64 @@
+name: 🛠️ 自动构建 (Auto Build)
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: auto-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: 🪟 构建 Windows 安装包 (Build Windows Installer)
+    runs-on: windows-2025
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: 检出代码 (Checkout)
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: 安装 Rust (Install Rust)
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: 缓存 Cargo 依赖 (Cache Cargo Dependencies)
+        uses: Swatinem/rust-cache@v2
+
+      - name: 安装 NSIS (Install NSIS)
+        run: |
+          if [ ! -f "/c/Program Files (x86)/NSIS/makensis.exe" ]; then
+            choco install nsis -y --no-progress
+          fi
+
+      - name: 运行 build 构建 (Run Cargo Build)
+        run: cargo build --profile dist --locked
+
+      - name: 整理构建产物 (Prepare Build Artifacts)
+        id: prepare
+        run: |
+          set -euo pipefail
+          VERSION="$(cargo metadata --no-deps --format-version=1 | jq -r '.packages[] | select(.name == "clippi") | .version')"
+          STAGING="target/nsis-staging"
+          rm -rf "$STAGING"
+          mkdir -p "$STAGING"
+          cp target/dist/clippi.exe "$STAGING/"
+          cp assets/LOGO_notext.ico "$STAGING/app.ico"
+          cp LICENSE "$STAGING/LICENSE.txt"
+          STAGING_WIN="$(cygpath -w "$PWD/$STAGING")"
+          # //D prevents Git Bash from mangling /D into a drive-relative path
+          "/c/Program Files (x86)/NSIS/makensis.exe" //INPUTCHARSET UTF8 //DVERSION="$VERSION" "//DSTAGING=$STAGING_WIN" installer.nsi
+          echo "installer=$STAGING/Clippi_${VERSION}_x64-setup.exe" >> "$GITHUB_OUTPUT"
+
+      - name: 上传构建产物 (Upload Build Artifacts)
+        uses: actions/upload-artifact@v7
+        with:
+          path: ${{ steps.prepare.outputs.installer }}
+          archive: false
+          if-no-files-found: error
