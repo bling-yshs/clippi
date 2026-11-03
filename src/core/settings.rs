@@ -269,6 +269,8 @@ pub struct AppSettings {
     pub image_alt_mode: String, // advanced paste mode for images: "bitmap" | "path" | "ocr"
     #[serde(default = "default_paste_click_mode")]
     pub paste_click_mode: String, // main-window paste gesture: "double_click" | "single_click"
+    #[serde(default = "default_click_action")]
+    pub click_action: String, // main-window click gesture action: "paste" | "copy"
     #[serde(default)]
     pub edit_auto_save: bool,
     /// 「Alt 快捷切换」：按住 Alt 浮出快捷键提示（收藏按钮 D、类型标签 1~9），
@@ -283,6 +285,10 @@ fn default_image_alt_mode() -> String {
 
 fn default_paste_click_mode() -> String {
     "double_click".to_string()
+}
+
+fn default_click_action() -> String {
+    "paste".to_string()
 }
 
 fn default_qr_enabled() -> bool {
@@ -448,6 +454,7 @@ impl Default for AppSettings {
             always_reset_to_clipboard: false,
             image_alt_mode: default_image_alt_mode(),
             paste_click_mode: default_paste_click_mode(),
+            click_action: default_click_action(),
             edit_auto_save: false,
             alt_shortcuts_enabled: true,
         }
@@ -695,6 +702,15 @@ impl AppSettings {
             "single_click".to_string()
         } else {
             default_paste_click_mode()
+        }
+    }
+
+    /// Unknown persisted values fall back to the default action (paste).
+    pub fn click_action_normalized(&self) -> String {
+        if self.click_action == "copy" {
+            "copy".to_string()
+        } else {
+            default_click_action()
         }
     }
 }

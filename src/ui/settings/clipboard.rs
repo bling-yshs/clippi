@@ -32,7 +32,12 @@ impl SettingsPanel {
         let record_files = app.settings.record_files;
         let search_favorites_first = app.settings.search_favorites_first;
         let card_height_mode = app.settings.card_height_mode.clone();
-        let paste_click_mode = app.settings.paste_click_mode_normalized();
+        // Combined selector key: "<paste_click_mode>_<click_action>".
+        let click_gesture = format!(
+            "{}_{}",
+            app.settings.paste_click_mode_normalized(),
+            app.settings.click_action_normalized()
+        );
         let show_source_app = app.settings.show_source_app;
         let auto_scroll_to_top = app.settings.auto_scroll_to_top;
         let copy_as_plain_text = app.settings.copy_as_plain_text;
@@ -348,13 +353,22 @@ impl SettingsPanel {
                     I18nKey::SettingPasteClickMode.text(),
                     I18nKey::DescPasteClickMode.text(),
                     &[
-                        ("double_click", I18nKey::PasteClickModeDouble.text()),
-                        ("single_click", I18nKey::PasteClickModeSingle.text()),
+                        ("double_click_paste", I18nKey::PasteClickModeDouble.text()),
+                        ("single_click_paste", I18nKey::PasteClickModeSingle.text()),
+                        ("double_click_copy", I18nKey::CopyClickModeDouble.text()),
+                        ("single_click_copy", I18nKey::CopyClickModeSingle.text()),
                     ],
-                    &paste_click_mode,
+                    &click_gesture,
                     move |key, _window, _cx| {
+                        let (mode, action) = match key {
+                            "single_click_paste" => ("single_click", "paste"),
+                            "double_click_copy" => ("double_click", "copy"),
+                            "single_click_copy" => ("single_click", "copy"),
+                            _ => ("double_click", "paste"),
+                        };
                         state.update(_cx, |s, _cx| {
-                            s.settings.paste_click_mode = key.to_string();
+                            s.settings.paste_click_mode = mode.to_string();
+                            s.settings.click_action = action.to_string();
                             s.settings.save();
                         });
                         this.update(_cx, |_panel, cx| {

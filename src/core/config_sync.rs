@@ -214,6 +214,12 @@ pub struct PortableSettingsV1 {
         deserialize_with = "deserialize_present",
         skip_serializing_if = "Option::is_none"
     )]
+    pub click_action: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub filter_foreign_paths: Option<bool>,
 
     // ── Clipboard Features ──
@@ -384,6 +390,7 @@ impl PortableSettingsV1 {
             type_filter_config: settings.type_filter_config.clone(),
             search_favorites_first: Some(settings.search_favorites_first),
             paste_click_mode: Some(settings.paste_click_mode.clone()),
+            click_action: Some(settings.click_action_normalized()),
             filter_foreign_paths: Some(settings.filter_foreign_paths),
 
             ocr_enabled: settings.ocr_enabled,
@@ -462,6 +469,9 @@ impl PortableSettingsV1 {
         if let Some(value) = &self.paste_click_mode {
             result.paste_click_mode = value.clone();
         }
+        if let Some(value) = &self.click_action {
+            result.click_action = value.clone();
+        }
         if let Some(value) = self.filter_foreign_paths {
             result.filter_foreign_paths = value;
         }
@@ -532,6 +542,13 @@ impl PortableSettingsV1 {
             if !["single_click", "double_click"].contains(&mode.as_str()) {
                 return Err(ConfigSyncError::InvalidFieldValue(format!(
                     "unknown paste_click_mode: {mode}"
+                )));
+            }
+        }
+        if let Some(action) = &self.click_action {
+            if !["paste", "copy"].contains(&action.as_str()) {
+                return Err(ConfigSyncError::InvalidFieldValue(format!(
+                    "unknown click_action: {action}"
                 )));
             }
         }

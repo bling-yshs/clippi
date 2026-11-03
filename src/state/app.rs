@@ -2752,19 +2752,58 @@ impl AppState {
         paste_after_delay(shortcuts);
     }
 
+    /// Click-to-copy (copy-mode click gesture): write the item to the clipboard
+    /// with full formatting (or as plain text), then hand focus back to the
+    /// paste target exactly like a paste would — without sending the paste
+    /// shortcut.
+    pub fn copy_item_and_restore_focus(&mut self, id: i64, plain: bool) {
+        let item = match self.db.get_by_id(id) {
+            Ok(Some(item)) => item,
+            Ok(None) => {
+                log::warn!("copy_item_and_restore_focus: item {id} not found");
+                return;
+            }
+            Err(e) => {
+                log::error!("copy_item_and_restore_focus: db error for {id}: {e}");
+                return;
+            }
+        };
+
+        self.touch_item_usage(&item);
+        if plain {
+            self.write_item_as_plain_text_to_clipboard_internal(&item);
+        } else {
+            self.write_item_to_clipboard_internal(&item, false);
+        }
+        crate::platform::paste::restore_paste_target();
+    }
+
     /// Paste an image as bitmap data for apps that do not accept file references.
     pub fn paste_image_as_bitmap(&mut self, id: i64) {
+        self.write_image_as_bitmap(id, true);
+    }
+
+    /// Copy an image as bitmap data (copy-mode click gesture), then hand focus
+    /// back to the paste target without sending the paste shortcut.
+    pub fn copy_image_as_bitmap(&mut self, id: i64) {
+        self.write_image_as_bitmap(id, false);
+    }
+
+    /// Shared bitmap write: load the image off the main thread, write it as a
+    /// bitmap, restore focus to the paste target and — when `then_paste` —
+    /// simulate the paste shortcut.
+    fn write_image_as_bitmap(&mut self, id: i64, then_paste: bool) {
         use crate::core::types::ContentType;
         use crate::platform::paste::{paste_after_delay, restore_paste_target};
 
         let item = match self.db.get_by_id(id) {
             Ok(Some(item)) => item,
             Ok(None) => {
-                log::warn!("paste_image_as_bitmap: item {id} not found");
+                log::warn!("write_image_as_bitmap: item {id} not found");
                 return;
             }
             Err(e) => {
-                log::error!("paste_image_as_bitmap: db error for {id}: {e}");
+                log::error!("write_image_as_bitmap: db error for {id}: {e}");
                 return;
             }
         };
@@ -2795,19 +2834,21 @@ impl AppState {
             });
 
             if !wrote {
-                log::warn!("paste_image_as_bitmap: failed to write image for item {item_id}");
+                log::warn!("write_image_as_bitmap: failed to write image for item {item_id}");
                 bitmap_paste_finished.store(true, Ordering::SeqCst);
                 return;
             }
 
             if !crate::services::clipboard_ops::verify_clipboard_image(500) {
-                log::warn!("paste_image_as_bitmap: image verification failed for item {item_id}");
+                log::warn!("write_image_as_bitmap: image verification failed for item {item_id}");
                 std::thread::sleep(std::time::Duration::from_millis(100));
             }
 
             bitmap_paste_finished.store(true, Ordering::SeqCst);
             restore_paste_target();
-            paste_after_delay(shortcuts);
+            if then_paste {
+                paste_after_delay(shortcuts);
+            }
         });
     }
 

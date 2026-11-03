@@ -202,6 +202,28 @@ impl PasteClickMode {
     }
 }
 
+/// What a main-window click gesture does once `resolve_card_click_action`
+/// decides on a paste-type action, normalized from the persisted
+/// `click_action` setting. `Paste` is the default (write + paste shortcut);
+/// `Copy` writes the same content to the clipboard and hands focus back to the
+/// paste target without sending the paste shortcut. The gesture matrix itself
+/// (which click, which modifier, selection rules) is identical in both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClickAction {
+    Paste,
+    Copy,
+}
+
+impl ClickAction {
+    fn from_settings(value: &str) -> Self {
+        if value == "copy" {
+            ClickAction::Copy
+        } else {
+            ClickAction::Paste
+        }
+    }
+}
+
 /// Resolved modifier intent for a card click gesture. This is the semantic
 /// bucket the dispatch matrix switches on; `classify_card_modifier` derives it
 /// from the raw GPUI `Modifiers` so the two spreadsheet columns (paste format
@@ -1209,16 +1231,49 @@ impl ClipboardListView {
             CardClickAction::PasteDefault => {
                 self.single_click_paste_default(index, cx);
             }
-            CardClickAction::PastePlain => {
-                self.state.update(cx, |s, _cx| s.paste_item_plain(item_id));
-                self.sync_items_from_state_for_usage(cx);
-            }
-            CardClickAction::PasteBitmap => {
-                self.state
-                    .update(cx, |s, _cx| s.paste_image_as_bitmap(item_id));
-                self.sync_items_from_state_for_usage(cx);
-            }
+            CardClickAction::PastePlain => self.click_write_plain(item_id, cx),
+            CardClickAction::PasteBitmap => self.click_write_bitmap(item_id, cx),
         }
+    }
+
+    /// The configured click action (paste or copy) for the main-window gestures.
+    fn click_action(&self, cx: &Context<Self>) -> ClickAction {
+        ClickAction::from_settings(&self.state.read(cx).settings.click_action_normalized())
+    }
+
+    /// Click gesture, default format: paste, or copy and restore focus.
+    fn click_write_default(&mut self, item_id: i64, cx: &mut Context<Self>) {
+        match self.click_action(cx) {
+            ClickAction::Paste => self.state.update(cx, |s, _cx| s.paste_item(item_id, false)),
+            ClickAction::Copy => self
+                .state
+                .update(cx, |s, _cx| s.copy_item_and_restore_focus(item_id, false)),
+        }
+        self.sync_items_from_state_for_usage(cx);
+    }
+
+    /// Click gesture with Shift: plain-text paste, or plain-text copy.
+    fn click_write_plain(&mut self, item_id: i64, cx: &mut Context<Self>) {
+        match self.click_action(cx) {
+            ClickAction::Paste => self.state.update(cx, |s, _cx| s.paste_item_plain(item_id)),
+            ClickAction::Copy => self
+                .state
+                .update(cx, |s, _cx| s.copy_item_and_restore_focus(item_id, true)),
+        }
+        self.sync_items_from_state_for_usage(cx);
+    }
+
+    /// Click gesture with Ctrl/Cmd on an image: bitmap paste, or bitmap copy.
+    fn click_write_bitmap(&mut self, item_id: i64, cx: &mut Context<Self>) {
+        match self.click_action(cx) {
+            ClickAction::Paste => self
+                .state
+                .update(cx, |s, _cx| s.paste_image_as_bitmap(item_id)),
+            ClickAction::Copy => self
+                .state
+                .update(cx, |s, _cx| s.copy_image_as_bitmap(item_id)),
+        }
+        self.sync_items_from_state_for_usage(cx);
     }
 
     /// Unmodified single-click behavior: target the clicked card by id, without
@@ -1243,10 +1298,7 @@ impl ClipboardListView {
             return;
         }
         let item_id = item.id;
-        self.state.update(cx, |state, _cx| {
-            state.paste_item(item_id, false);
-        });
-        self.sync_items_from_state_for_usage(cx);
+        self.click_write_default(item_id, cx);
     }
 
     /// Double-click (default) mode: legacy single-click selection plus modified
@@ -1292,8 +1344,12 @@ impl ClipboardListView {
     /// multi-selection batch-pastes all selected items; a single selected item
     /// pastes with full formatting, except a single transfer entry (unmodified)
     /// which opens/downloads instead of pasting (§2.4).
+    ///
+    /// In copy mode a multi-selection is not batch-written; only the clicked
+    /// item is copied (the unmodified first click already collapses the
+    /// selection to that item, so this is a defensive fallback).
     fn double_click_paste_default(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.selected_ids.len() > 1 {
+        if self.selected_ids.len() > 1 && self.click_action(cx) == ClickAction::Paste {
             let ids = self.selected_ids.clone();
             self.state.update(cx, |s, _cx| s.batch_paste(&ids, false));
             self.sync_items_from_state_for_usage(cx);
@@ -1313,8 +1369,7 @@ impl ClipboardListView {
                 return;
             }
             let item_id = item.id;
-            self.state.update(cx, |s, _cx| s.paste_item(item_id, false));
-            self.sync_items_from_state_for_usage(cx);
+            self.click_write_default(item_id, cx);
         }
     }
 
@@ -1353,8 +1408,7 @@ impl ClipboardListView {
                     && item.content_type == ContentType::Image
                 {
                     let id = item.id;
-                    self.state.update(cx, |s, _cx| s.paste_image_as_bitmap(id));
-                    self.sync_items_from_state_for_usage(cx);
+                    self.click_write_bitmap(id, cx);
                 }
             }
             // Bare Shift — candidate-gated plain-text paste.
@@ -1369,8 +1423,7 @@ impl ClipboardListView {
                     && matches!(candidate.modifier, ModifiedPasteModifier::PlainText)
                 {
                     let id = item.id;
-                    self.state.update(cx, |s, _cx| s.paste_item_plain(id));
-                    self.sync_items_from_state_for_usage(cx);
+                    self.click_write_plain(id, cx);
                 }
             }
             // Any other modifier combination — consume the click, never paste.
