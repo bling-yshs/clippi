@@ -2778,6 +2778,91 @@ impl AppState {
         crate::platform::paste::restore_paste_target();
     }
 
+    /// Build the drag-out payload for `ids`, in the given (selection) order.
+    ///
+    /// Images and files contribute their existing backing paths (missing paths
+    /// are skipped); text items contribute text — a single text item keeps its
+    /// HTML/RTF, several are joined as plain text with newlines. Transfer and
+    /// unknown ids are skipped. Returns the payload together with the items it
+    /// covers (for the usage touch after a successful drop), or `None` when
+    /// nothing is draggable.
+    pub fn build_drag_payload(
+        &self,
+        ids: &[i64],
+    ) -> Option<(crate::platform::drag_out::DragPayload, Vec<ClipboardItem>)> {
+        use crate::core::types::{FileData, RichData};
+        use std::path::Path;
+
+        let items: Vec<ClipboardItem> = ids
+            .iter()
+            .filter(|&&id| id > 0)
+            .filter_map(|&id| self.db.get_by_id(id).ok().flatten())
+            .collect();
+
+        let mut payload = crate::platform::drag_out::DragPayload::default();
+        let mut covered: Vec<ClipboardItem> = Vec::new();
+        let mut text_items: Vec<&ClipboardItem> = Vec::new();
+        for item in &items {
+            match item.content_type {
+                ContentType::Image => {
+                    if !item.image_path.is_empty() && Path::new(&item.image_path).is_file() {
+                        payload.files.push(item.image_path.clone());
+                        covered.push(item.clone());
+                    }
+                }
+                ContentType::File => {
+                    let existing: Vec<String> = FileData::from_json(&item.file_data)
+                        .files
+                        .into_iter()
+                        .map(|file| file.path)
+                        .filter(|path| !path.is_empty() && Path::new(path).exists())
+                        .collect();
+                    if !existing.is_empty() {
+                        payload.files.extend(existing);
+                        covered.push(item.clone());
+                    }
+                }
+                _ => text_items.push(item),
+            }
+        }
+
+        match text_items.as_slice() {
+            [] => {}
+            [single] => {
+                let text = if single.full_text.is_empty() {
+                    crate::services::clipboard_ops::plain_text_for_item(single)
+                } else {
+                    single.full_text.clone()
+                };
+                if !text.is_empty() {
+                    let rich = RichData::from_json(&single.rich_data);
+                    payload.text = Some(text);
+                    payload.html = rich.html;
+                    payload.rtf = rich.rtf;
+                    covered.push((*single).clone());
+                }
+            }
+            many => {
+                let texts: Vec<String> = many
+                    .iter()
+                    .map(|item| crate::services::clipboard_ops::plain_text_for_item(item))
+                    .filter(|text| !text.is_empty())
+                    .collect();
+                if !texts.is_empty() {
+                    payload.text = Some(texts.join("\n"));
+                    covered.extend(many.iter().map(|item| (*item).clone()));
+                }
+            }
+        }
+
+        (!payload.is_empty()).then_some((payload, covered))
+    }
+
+    /// Usage-time update after a successful drag-out drop.
+    pub fn touch_dragged_items_usage(&mut self, items: &[ClipboardItem]) {
+        self.touch_items_usage(items);
+    }
+
     /// Paste an image as bitmap data for apps that do not accept file references.
     pub fn paste_image_as_bitmap(&mut self, id: i64) {
         self.write_image_as_bitmap(id, true);

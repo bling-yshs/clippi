@@ -160,6 +160,40 @@ struct ModifiedDoubleClickCandidate {
     modifier: ModifiedPasteModifier,
 }
 
+/// A left-button press on a card that may still turn into a drag-out once
+/// the pointer moves past the system drag threshold.
+#[derive(Clone, Copy)]
+struct DragPress {
+    index: usize,
+    item_id: i64,
+    origin: Point<Pixels>,
+}
+
+/// A card click action deferred from mouse-down to mouse-up so the press can
+/// still become a drag: single-click paste/copy, and the plain click that
+/// would collapse a multi-selection the user may be about to drag.
+#[derive(Clone, Copy)]
+struct PendingCardClick {
+    index: usize,
+    item_id: i64,
+    action: CardClickAction,
+}
+
+/// Native window handle of `window` (Windows HWND), used as the drag source.
+#[cfg(target_os = "windows")]
+fn native_window_handle(window: &Window) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match HasWindowHandle::window_handle(window).ok()?.as_raw() {
+        RawWindowHandle::Win32(handle) => Some(handle.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_window_handle(_window: &Window) -> Option<isize> {
+    None
+}
+
 /// Normalized modifier classification for modified double-click gestures.
 ///
 /// Only a bare primary modifier (Ctrl on Windows/Linux, Cmd on macOS) or a
@@ -466,6 +500,12 @@ pub struct ClipboardListView {
     escape_consumed_inline: bool,
     /// Candidate for Ctrl/Cmd/Shift double-click paste (see `handle_card_click`).
     modified_double_click_candidate: Option<ModifiedDoubleClickCandidate>,
+    /// Left-button press that may become a drag-out (see `maybe_start_drag_out`).
+    drag_press: Option<DragPress>,
+    /// Click action deferred to mouse-up (see `PendingCardClick`).
+    pending_card_click: Option<PendingCardClick>,
+    /// A native drag-out is running; at most one at a time.
+    drag_out_active: bool,
 }
 
 impl ClipboardListView {
@@ -527,6 +567,9 @@ impl ClipboardListView {
             recording_hotkey_format: String::new(),
             escape_consumed_inline: false,
             modified_double_click_candidate: None,
+            drag_press: None,
+            pending_card_click: None,
+            drag_out_active: false,
         }
     }
 
@@ -1171,6 +1214,9 @@ impl ClipboardListView {
             self.commit_note_edit(window, cx);
         }
 
+        // A new press supersedes any click still waiting for its mouse-up.
+        self.pending_card_click = None;
+
         // Pending placeholders are not selectable until replaced by a real item.
         if self.items.get(index).is_some_and(item_is_pending) {
             return;
@@ -1220,6 +1266,38 @@ impl ClipboardListView {
         // stale candidate from a prior mode switch must not survive here.
         self.modified_double_click_candidate = None;
 
+        // Where drag-out is available, a press must stay a potential drag:
+        // paste/copy runs on mouse-up instead (and is dropped if the press
+        // turns into a drag), and a plain click on a card inside the
+        // multi-selection keeps that selection until mouse-up so it can be
+        // dragged as a whole.
+        let defer = crate::platform::drag_out::SUPPORTED
+            && match action {
+                CardClickAction::PasteDefault
+                | CardClickAction::PastePlain
+                | CardClickAction::PasteBitmap => true,
+                CardClickAction::SelectSingle => clicked_is_selected && selected_count > 1,
+                _ => false,
+            };
+        if defer {
+            self.pending_card_click = Some(PendingCardClick {
+                index,
+                item_id,
+                action,
+            });
+            return;
+        }
+        self.execute_card_click_action(index, item_id, action, cx);
+    }
+
+    /// Execute a resolved card click action (immediately or on mouse-up).
+    fn execute_card_click_action(
+        &mut self,
+        index: usize,
+        item_id: i64,
+        action: CardClickAction,
+        cx: &mut Context<Self>,
+    ) {
         match action {
             CardClickAction::Noop => {}
             CardClickAction::SelectSingle => self.select_index_without_scroll(index, cx),
@@ -1318,6 +1396,23 @@ impl ClipboardListView {
                 .is_some_and(|item| self.selected_ids[0] == item.id);
         let candidate_modifier = modified_double_click_kind(modifiers);
 
+        // A plain press on a card inside the multi-selection keeps the
+        // selection until mouse-up so the whole selection can be dragged out
+        // (the mouse-up then collapses it exactly as the press used to).
+        if crate::platform::drag_out::SUPPORTED && modifiers.number_of_modifiers() == 0 {
+            if let Some(item_id) = self.items.get(index).map(|item| item.id) {
+                if self.selected_ids.len() > 1 && self.selected_ids.contains(&item_id) {
+                    self.modified_double_click_candidate = None;
+                    self.pending_card_click = Some(PendingCardClick {
+                        index,
+                        item_id,
+                        action: CardClickAction::SelectSingle,
+                    });
+                    return;
+                }
+            }
+        }
+
         if additive_selection_modifier(modifiers) {
             self.toggle_index(index, cx);
         } else if modifiers.shift {
@@ -1336,6 +1431,139 @@ impl ClipboardListView {
                 }),
             _ => None,
         };
+    }
+
+    /// Left-button press on a card row: remember it as a potential drag-out.
+    /// Double-click presses never start a drag (the second click already
+    /// pasted/copied in double-click mode).
+    fn begin_card_press(&mut self, index: usize, ev: &MouseDownEvent) {
+        self.drag_press = None;
+        if !crate::platform::drag_out::SUPPORTED || ev.click_count > 1 {
+            return;
+        }
+        let Some(item) = self.items.get(index) else {
+            return;
+        };
+        self.drag_press = Some(DragPress {
+            index,
+            item_id: item.id,
+            origin: ev.position,
+        });
+    }
+
+    /// Left-button release over a card row: run the deferred click, if it was
+    /// pressed on this same card and the press did not become a drag.
+    fn finish_card_press(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.drag_press = None;
+        let Some(pending) = self.pending_card_click.take() else {
+            return;
+        };
+        if pending.index != index
+            || self.items.get(index).map(|item| item.id) != Some(pending.item_id)
+        {
+            return;
+        }
+        self.execute_card_click_action(index, pending.item_id, pending.action, cx);
+    }
+
+    /// Track pointer movement during a card press. Returns `true` while the
+    /// press is active (so hover-to-select does not run mid-press); starts the
+    /// native drag-out once the system drag threshold is exceeded.
+    fn maybe_start_drag_out(
+        &mut self,
+        ev: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(press) = self.drag_press else {
+            return false;
+        };
+        if ev.pressed_button != Some(MouseButton::Left) {
+            // The release happened outside any card row.
+            self.drag_press = None;
+            self.pending_card_click = None;
+            return false;
+        }
+        let (threshold_x, threshold_y) = crate::platform::drag_out::drag_threshold_px();
+        let scale = window.scale_factor();
+        let dx = f32::from(ev.position.x - press.origin.x).abs() * scale;
+        let dy = f32::from(ev.position.y - press.origin.y).abs() * scale;
+        if dx < threshold_x && dy < threshold_y {
+            return true;
+        }
+        // The press is a drag gesture now: never run its click action, even
+        // when nothing turns out to be draggable.
+        self.drag_press = None;
+        self.pending_card_click = None;
+        self.modified_double_click_candidate = None;
+        self.start_drag_out(press, window, cx);
+        true
+    }
+
+    /// Start a native drag-out of the pressed card, or of the whole
+    /// multi-selection when the pressed card is part of it.
+    fn start_drag_out(&mut self, press: DragPress, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag_out_active {
+            return;
+        }
+        let Some(item) = self
+            .items
+            .get(press.index)
+            .filter(|item| item.id == press.item_id)
+        else {
+            return;
+        };
+        let not_draggable = |item: &ClipboardItem, editing_id: i64| {
+            item_is_pending(item)
+                || item.meta_type == "transfer"
+                || item.id <= 0
+                || item.id == editing_id
+        };
+        if not_draggable(item, self.editing_note_id) {
+            return;
+        }
+        let ids: Vec<i64> = if self.selected_ids.len() > 1 && self.selected_ids.contains(&item.id) {
+            self.selected_ids
+                .iter()
+                .copied()
+                .filter(|id| {
+                    self.items
+                        .iter()
+                        .find(|item| item.id == *id)
+                        .is_none_or(|item| !not_draggable(item, self.editing_note_id))
+                })
+                .collect()
+        } else {
+            vec![item.id]
+        };
+        let Some((payload, covered)) = self.state.read(cx).build_drag_payload(&ids) else {
+            return;
+        };
+        let Some(hwnd) = native_window_handle(window) else {
+            return;
+        };
+
+        // Keep the window up for the whole drag and the focus settling after
+        // the drop, whatever the auto-hide preference.
+        let guard = self.window_manager.read(cx).suspend_auto_hide_for_dialog();
+        // `run_drag` runs a modal OLE loop that pumps window messages, so it
+        // must run from a foreground task body — never inside an app update,
+        // where GPUI callbacks dispatched by the nested loop would re-enter.
+        self.drag_out_active = true;
+        cx.spawn(async move |this, cx| {
+            let dropped = crate::platform::drag_out::run_drag(hwnd, &payload);
+            drop(guard);
+            let _ = this.update(cx, |this, cx| {
+                this.drag_out_active = false;
+                if dropped {
+                    this.state
+                        .update(cx, |state, _cx| state.touch_dragged_items_usage(&covered));
+                    this.sync_items_from_state_for_usage(cx);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Default paste behavior (no modifiers): paste with full formatting.
@@ -3017,11 +3245,34 @@ impl Render for ClipboardListView {
                                                         );
                                                     }
                                                 })
+                                                .on_mouse_down(MouseButton::Left, {
+                                                    let list_for_press = list_entity.clone();
+                                                    move |ev: &MouseDownEvent, _window, cx| {
+                                                        list_for_press.update(cx, |this, _cx| {
+                                                            this.begin_card_press(i, ev);
+                                                        });
+                                                    }
+                                                })
+                                                // Capture phase: the card itself swallows mouse-up.
+                                                .capture_any_mouse_up({
+                                                    let list_for_release = list_entity.clone();
+                                                    move |ev: &MouseUpEvent, _window, cx| {
+                                                        if ev.button != MouseButton::Left {
+                                                            return;
+                                                        }
+                                                        list_for_release.update(cx, |this, cx| {
+                                                            this.finish_card_press(i, cx);
+                                                        });
+                                                    }
+                                                })
                                                 .on_mouse_move({
                                                     move |ev, window, cx| {
                                                         cx.stop_propagation();
                                                         let modifiers = ev.modifiers;
                                                         list_for_hover.update(cx, |this, cx| {
+                                                            if this.maybe_start_drag_out(ev, window, cx) {
+                                                                return;
+                                                            }
                                                             this.refresh_pointer_hover(window, cx);
                                                             if this
                                                                 .inline_locked_item_id()
