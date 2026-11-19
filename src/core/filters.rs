@@ -144,6 +144,15 @@ impl ClipboardFilters {
         self.tag_ids.clear();
     }
 
+    /// Clear the type, favorites, hotkey and tag filters.
+    /// Keyword and source app have their own show-time settings and are kept.
+    pub fn clear_view_filters(&mut self) {
+        self.type_filters.clear();
+        self.favorites_only = false;
+        self.hotkeys_only = false;
+        self.tag_ids.clear();
+    }
+
     /// Toggle tag match mode between OR and AND
     pub fn toggle_tag_mode(&mut self) {
         self.tag_match_all = !self.tag_match_all;

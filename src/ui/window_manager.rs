@@ -3414,6 +3414,10 @@ impl WindowManager {
         self.pinned = false;
         cx.emit(WindowManagerEvent::PinnedChanged(false));
 
+        // Every summon starts with no type / favorites / hotkey / tag filter.
+        self.state
+            .update(cx, |state, _| state.reset_view_filters_for_show());
+
         // Reset the source before loading, so the first visible frame uses all sources.
         let reset_source = self
             .state

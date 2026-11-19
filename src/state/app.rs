@@ -1197,6 +1197,13 @@ impl AppState {
         self.reload_items();
     }
 
+    /// Drop the type / favorites / hotkey / tag filters without reloading;
+    /// the show path reloads right after, so every summon starts unfiltered.
+    pub fn reset_view_filters_for_show(&mut self) {
+        self.filters.clear_view_filters();
+        self.selected_ids.clear();
+    }
+
     /// Reset only the source dimension before the main window reloads its items.
     pub fn reset_source_filter_for_show(&mut self) -> bool {
         if !self.settings.reset_source_filter_on_show {
