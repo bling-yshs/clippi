@@ -1694,8 +1694,14 @@ impl ClipboardListener for PollingClipboardListener {
                 }
 
                 // ── Capture source identity once (before opening clipboard) ──
+                // Only the sequence number identifies a clipboard version. The
+                // owner HWND is deliberately not part of it: writers such as
+                // pyperclip own the clipboard through a throwaway window and
+                // destroy it right after CloseClipboard, which turns
+                // GetClipboardOwner() into NULL without changing the data or
+                // the sequence. Treating that as "superseded" dropped the copy.
                 #[cfg(target_os = "windows")]
-                let (sequence, owner) = (current_clipboard_seq(), current_clipboard_owner());
+                let sequence = current_clipboard_seq();
                 let source_info = source::get_clipboard_owner_info();
 
                 // ── Clone blacklist snapshot and release the read-lock ──
@@ -1747,7 +1753,6 @@ impl ClipboardListener for PollingClipboardListener {
                                 && !batch_pasting.load(Ordering::SeqCst)
                                 && !skip_next.load(Ordering::SeqCst)
                                 && current_clipboard_seq() == sequence
-                                && current_clipboard_owner() == owner
                         },
                         |duration| {
                             let deadline = Instant::now() + duration;
@@ -1756,7 +1761,6 @@ impl ClipboardListener for PollingClipboardListener {
                                 && !batch_pasting.load(Ordering::SeqCst)
                                 && !skip_next.load(Ordering::SeqCst)
                                 && current_clipboard_seq() == sequence
-                                && current_clipboard_owner() == owner
                             {
                                 thread::sleep(
                                     deadline
